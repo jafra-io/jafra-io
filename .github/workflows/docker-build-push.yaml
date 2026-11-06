@@ -1,0 +1,80 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - '**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: quay.io/causaaihub
+
+jobs:
+  build-and-push:
+    name: Build & Push ${{ matrix.component }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Controller builds from its own directory.
+          - component: jafra-controller
+            context: jafra-controller
+            dockerfile: jafra-controller/Dockerfile
+          # Agent and analyzer need contracts/ from the repo root.
+          - component: jafra-agent
+            context: .
+            dockerfile: jafra-agent/Dockerfile
+          - component: jafra-analyzer
+            context: .
+            dockerfile: jafra-analyzer/Dockerfile
+
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Normalize branch name for Docker tag
+        id: normalize-branch
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          STRIPPED="${BRANCH_NAME}"
+          if [[ "$STRIPPED" =~ ^[Ff][Ee][Aa][Tt][Uu][Rr][Ee]/(.*)$ ]]; then
+            STRIPPED="${BASH_REMATCH[1]}"
+          fi
+          NORMALIZED_TAG=$(echo "$STRIPPED" | sed -E 's#[ /]+#-#g' | tr '[:upper:]' '[:lower:]')
+          echo "tag=${NORMALIZED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Original branch: ${BRANCH_NAME}"
+          echo "Normalized tag: ${NORMALIZED_TAG}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME || secrets.QUAY_ROBOT_NAME || secrets.QUAY_USER }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN || secrets.QUAY_PASSWORD || secrets.QUAY_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ env.REGISTRY }}/${{ matrix.component }}:${{ steps.normalize-branch.outputs.tag }}
